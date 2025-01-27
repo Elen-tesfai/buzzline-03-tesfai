@@ -1,13 +1,13 @@
+# json_consumer_tesfai.py
+
 """
-json_consumer_tesfai.py
+Consume JSON data from a Kafka topic.
 
-Consume JSON data from a Kafka topic and perform real-time analytics.
-
-Example JSON message:
+Example received JSON message:
 {"message": "I love Python!", "author": "Eve"}
 
-Example deserialized message from Kafka:
-{"message": "I love Python!", "author": "Eve"}
+Example serialized from Kafka message:
+"{\"message\": \"I love Python!\", \"author\": \"Eve\"}"
 """
 
 #####################################
@@ -17,15 +17,17 @@ Example deserialized message from Kafka:
 # Import packages from Python Standard Library
 import os
 import sys
+import time
 import json
+import pathlib
 
 # Import external packages
 from dotenv import load_dotenv
-from kafka import KafkaConsumer
+from confluent_kafka import Consumer, KafkaException, KafkaError
 
 # Import functions from local modules
-from utils.utils_consumer import process_message
 from utils.utils_logger import logger
+from utils.utils_producer import verify_services
 
 #####################################
 # Load Environment Variables
@@ -39,70 +41,87 @@ load_dotenv()
 
 def get_kafka_topic() -> str:
     """Fetch Kafka topic from environment or use default."""
-    topic = os.getenv("BUZZ_TOPIC", "smoker_topic")  # Modify topic as needed
+    topic = os.getenv("BUZZ_TOPIC", "smoker_topic")  # Same topic as producer
     logger.info(f"Kafka topic: {topic}")
     return topic
 
-
-def get_message_interval() -> int:
-    """Fetch message interval from environment or use default."""
-    interval = int(os.getenv("BUZZ_INTERVAL_SECONDS", 1))
-    logger.info(f"Message interval: {interval} seconds")
-    return interval
-
+def get_kafka_group() -> str:
+    """Fetch Kafka consumer group from environment or use default."""
+    group = os.getenv("KAFKA_GROUP", "smoker_consumer_group")  # Modify as needed
+    logger.info(f"Kafka group: {group}")
+    return group
 
 #####################################
 # Kafka Consumer Setup
 #####################################
 
 def create_kafka_consumer():
-    """Create a Kafka consumer."""
+    """Create and return a Kafka consumer instance."""
+    group = get_kafka_group()
     topic = get_kafka_topic()
-    consumer = KafkaConsumer(
-        topic,
-        group_id="my-group",  # Define consumer group
-        bootstrap_servers="localhost:9092",  # Kafka server address
-        auto_offset_reset="earliest",  # Start consuming from the beginning
-        value_deserializer=lambda x: json.loads(x.decode("utf-8")),
-    )
-    logger.info(f"Consumer connected to Kafka topic: {topic}")
+
+    # Consumer configuration
+    conf = {
+        'bootstrap.servers': os.getenv("KAFKA_BROKER", "localhost:9092"),
+        'group.id': group,
+        'auto.offset.reset': 'earliest',  # Start from the beginning
+    }
+
+    # Create consumer instance
+    consumer = Consumer(conf)
+
+    try:
+        consumer.subscribe([topic])
+        logger.info(f"Subscribed to topic: {topic}")
+    except KafkaException as e:
+        logger.error(f"Error subscribing to Kafka topic: {e}")
+        sys.exit(1)
+
     return consumer
 
 #####################################
-# Main Function
+# Message Consumer
 #####################################
 
-def main():
-    """
-    Main entry point for the consumer.
-
-    - Consumes messages from Kafka topic.
-    - Calls the `process_message` function for real-time analytics or logging.
-    """
-
-    logger.info("START consumer.")
-    
+def consume_messages():
+    """Consume messages from Kafka topic."""
     consumer = create_kafka_consumer()
 
     try:
-        for message in consumer:
-            logger.info(f"Received message: {message.value}")
-            process_message(message.value)  # You can add your custom processing logic here
+        while True:
+            msg = consumer.poll(timeout=1.0)  # Polling for new messages
+
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    logger.info(f"End of partition reached {msg.partition}, offset {msg.offset}")
+                else:
+                    raise KafkaException(msg.error())
+            else:
+                logger.info(f"Consumed message: {msg.value().decode('utf-8')}")
+                try:
+                    # Deserialize JSON message
+                    message_dict = json.loads(msg.value().decode('utf-8'))
+                    logger.debug(f"Processed message: {message_dict}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to decode JSON: {e}")
+                except Exception as e:
+                    logger.error(f"Unexpected error while processing message: {e}")
+
     except KeyboardInterrupt:
         logger.warning("Consumer interrupted by user.")
-    except Exception as e:
-        logger.error(f"Error during message consumption: {e}")
     finally:
         consumer.close()
         logger.info("Kafka consumer closed.")
-
-    logger.info("END consumer.")
-
 
 #####################################
 # Conditional Execution
 #####################################
 
 if __name__ == "__main__":
-    main()
+    logger.info("START consumer.")
+    verify_services()
+    consume_messages()
+    logger.info("END consumer.")
     
